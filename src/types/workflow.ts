@@ -129,8 +129,9 @@ export interface StaticPrecheckFinding {
 }
 
 export type ActiveTab =
-  | 'sources'
+  | 'delivery'
   | 'logic'
   | 'alignment'
   | 'objectification'
+  | 'sources'
   | 'refactor';

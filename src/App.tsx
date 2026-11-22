@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { User } from 'firebase/auth';
-import { Loader2, Play } from 'lucide-react';
+import { Download } from 'lucide-react';
 import type { ActiveTab, WorkflowAuditReport, WorkflowFile } from './types/workflow';
 import {
   DEFAULT_DRIVE_FOLDER_URL,
@@ -8,7 +8,8 @@ import {
   parseDriveFolderId,
   type DriveErrorDiagnosis,
 } from './utils/workflowAnalyzer';
-import { SAMPLE_AUDIT_REPORT, SAMPLE_WORKFLOW_FILES } from './data/sampleWorkflow';
+import { SAMPLE_WORKFLOW_FILES } from './data/sampleWorkflow';
+import { REAL_AUDIT_REPORT } from './data/realAuditReport';
 import { getAccessToken, googleSignIn, initAuth, logout } from './services/googleAuth';
 import {
   DriveApiError,
@@ -18,7 +19,7 @@ import {
   saveMarkdownToGoogleDrive,
   type DriveFolderSummary,
 } from './services/driveClient';
-import { GoogleSignInButton } from './components/GoogleSignInButton';
+import { WorkflowV2DeliveryView } from './components/WorkflowV2DeliveryView';
 import { SourcesWorkspace } from './components/SourcesWorkspace';
 import { HardLogicView } from './components/HardLogicView';
 import { AlignmentView } from './components/AlignmentView';
@@ -27,20 +28,20 @@ import { RefactorBlueprintView } from './components/RefactorBlueprintView';
 import { DriveConfirmModal } from './components/DriveConfirmModal';
 
 const NAV_TABS: Array<{ id: ActiveTab; label: string }> = [
-  { id: 'sources', label: '数据源' },
-  { id: 'logic', label: '硬逻辑诊断' },
-  { id: 'alignment', label: '文脚对齐' },
+  { id: 'delivery', label: '完整工作流交付' },
+  { id: 'logic', label: '硬逻辑审计' },
+  { id: 'alignment', label: '文脚错配' },
   { id: 'objectification', label: '客观化边界' },
-  { id: 'refactor', label: '重构方案' },
+  { id: 'refactor', label: '架构对比' },
 ];
 
 const DEFAULT_USER_CONTEXT =
-  '希望重构这套剪辑工作流的工作逻辑：先分析硬逻辑问题，梳理文字口述逻辑与脚本实现是否匹配；我当时倾向于“将剪辑客观化”，但实操中边界问题较多，且当前使用的自动化 AI 能力有限，请评估可行性并针对弱 AI 能力进行落地优化。';
+  '基于 Google Drive 原仓库 interview-video-objective-agent 的真实 116 份文件，重构为弱 AI 友好的 6 阶段剪辑工作流并直接交付至 GitHub。';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<ActiveTab>('sources');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('delivery');
 
-  // Google Auth state (in-memory token only via googleAuth service)
+  // Google Auth state (kept for optional Drive re-analysis / Drive backup)
   const [user, setUser] = useState<User | null>(null);
   const [hasDriveToken, setHasDriveToken] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
@@ -48,7 +49,7 @@ export default function App() {
   // Drive folder & workflow files state
   const [folderUrl, setFolderUrl] = useState(DEFAULT_DRIVE_FOLDER_URL);
   const [folderUrlError, setFolderUrlError] = useState<string | null>(null);
-  const [folderName, setFolderName] = useState('剪辑工作流示例目录（待连接 Google Drive）');
+  const [folderName, setFolderName] = useState('interview-video-objective-agent（已实测重构）');
   const [files, setFiles] = useState<WorkflowFile[]>(SAMPLE_WORKFLOW_FILES);
   const [isLoadingDrive, setIsLoadingDrive] = useState(false);
   const [driveProgress, setDriveProgress] = useState('');
@@ -57,9 +58,9 @@ export default function App() {
   const [accessibleFolders, setAccessibleFolders] = useState<DriveFolderSummary[]>([]);
   const [isBrowsingFolders, setIsBrowsingFolders] = useState(false);
 
-  // Audit analysis state
+  // Audit report defaults to the REAL forensic audit of interview-video-objective-agent
   const [userContext, setUserContext] = useState(DEFAULT_USER_CONTEXT);
-  const [report, setReport] = useState<WorkflowAuditReport>(SAMPLE_AUDIT_REPORT);
+  const [report, setReport] = useState<WorkflowAuditReport>(REAL_AUDIT_REPORT);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
@@ -135,13 +136,12 @@ export default function App() {
       setUser(result.user);
       setHasDriveToken(true);
 
-      // Immediately catch Granular OAuth Consent where user didn't tick Drive read checkbox
       if (result.scopeCheck && !result.scopeCheck.hasDriveRead) {
         const missingScopeDiag: DriveErrorDiagnosis = {
           kind: 'scope_missing',
           title: '登录成功，但尚未勾选 Google Drive 读取权限',
           detail:
-            'Google 授权弹窗中的「查看并下载您的所有 Google 云端硬盘文件」勾选框未被选中。请点击下方「重新授权并勾选 Drive 权限」，在弹窗里勾选该选项后再继续。',
+            'Google 授权弹窗中的「查看并下载您的所有 Google 云端硬盘文件」勾选框未被选中。请重新授权并勾选该选项。',
           needsReconsent: true,
         };
         setDriveDiagnosis(missingScopeDiag);
@@ -251,8 +251,8 @@ export default function App() {
 
   const handleResetSample = () => {
     setFiles(SAMPLE_WORKFLOW_FILES);
-    setFolderName('剪辑工作流示例目录（待连接 Google Drive）');
-    setReport(SAMPLE_AUDIT_REPORT);
+    setFolderName('interview-video-objective-agent（已实测重构）');
+    setReport(REAL_AUDIT_REPORT);
     setAnalyzeError(null);
     setDriveError(null);
   };
@@ -368,10 +368,6 @@ export default function App() {
     }
   };
 
-  const selectedReadableCount = files.filter(
-    (f) => f.selected && f.content.trim().length > 0
-  ).length;
-
   return (
     <div className="min-h-screen bg-[#F8F9FA] text-slate-900">
       {/* Strict 3-Zone Top Navigation Bar */}
@@ -382,11 +378,11 @@ export default function App() {
             href="#top"
             onClick={(e) => {
               e.preventDefault();
-              setActiveTab('sources');
+              setActiveTab('delivery');
             }}
             className="text-base font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
           >
-            CutLogic
+            CutLogic v2
           </a>
 
           {/* Zone 2: 5 Concise Single-Line Nav Tabs */}
@@ -416,27 +412,14 @@ export default function App() {
 
           {/* Zone 3: Single Primary Action */}
           <div className="flex items-center shrink-0">
-            {hasDriveToken ? (
-              <button
-                type="button"
-                onClick={handleRunAnalysis}
-                disabled={isAnalyzing || selectedReadableCount === 0}
-                className="inline-flex items-center gap-2 rounded-md bg-blue-700 px-4 py-2 text-xs font-semibold text-white hover:bg-blue-800 disabled:opacity-50 whitespace-nowrap shrink-0"
-              >
-                {isAnalyzing ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
-                ) : (
-                  <Play className="h-3.5 w-3.5" aria-hidden="true" />
-                )}
-                {isAnalyzing ? '正在分析…' : '运行深度重构'}
-              </button>
-            ) : (
-              <GoogleSignInButton
-                onClick={handleGoogleLogin}
-                disabled={isLoggingIn}
-                label={isLoggingIn ? '授权中…' : 'Sign in with Google'}
-              />
-            )}
+            <a
+              href="/api/workflow-v2/archive"
+              download="interview-video-objective-agent-v2.tar.gz"
+              className="inline-flex items-center gap-1.5 rounded-md bg-blue-700 px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-800 whitespace-nowrap shrink-0"
+            >
+              <Download className="h-3.5 w-3.5" aria-hidden="true" />
+              下载工作流 v2
+            </a>
           </div>
         </div>
 
@@ -466,22 +449,21 @@ export default function App() {
 
       {/* Main Content Container */}
       <main id="top" className="mx-auto max-w-[1440px] px-6 py-6">
-        {/* Sample Mode Context Notice */}
-        {report.sourceMode === 'sample' && activeTab !== 'sources' && (
-          <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-5 py-3 text-xs text-slate-700">
-            <span>
-              当前展示为剪辑客观化工作流示例审计报告。连接您的 Google Drive 文件夹后，可针对您的真实文档与脚本生成逐行诊断与重构方案。
-            </span>
-            <button
-              type="button"
-              onClick={() => setActiveTab('sources')}
-              className="font-semibold text-blue-700 hover:text-blue-900 whitespace-nowrap shrink-0"
-            >
-              前往连接 Google Drive →
-            </button>
-          </div>
+        {activeTab === 'delivery' && <WorkflowV2DeliveryView />}
+        {activeTab === 'logic' && <HardLogicView report={report} />}
+        {activeTab === 'alignment' && <AlignmentView report={report} />}
+        {activeTab === 'objectification' && <ObjectificationView report={report} />}
+        {activeTab === 'refactor' && (
+          <RefactorBlueprintView
+            report={report}
+            folderName={folderName}
+            files={files}
+            hasDriveToken={hasDriveToken}
+            onRequestDriveSave={handleRequestDriveSave}
+            onRequestDriveBundleSave={handleRequestDriveBundleSave}
+            driveSaveResult={driveSaveResult}
+          />
         )}
-
         {activeTab === 'sources' && (
           <SourcesWorkspace
             folderUrl={folderUrl}
@@ -514,21 +496,6 @@ export default function App() {
             onRemoveFile={handleRemoveFile}
             onResetSample={handleResetSample}
             onRunAnalysis={handleRunAnalysis}
-          />
-        )}
-
-        {activeTab === 'logic' && <HardLogicView report={report} />}
-        {activeTab === 'alignment' && <AlignmentView report={report} />}
-        {activeTab === 'objectification' && <ObjectificationView report={report} />}
-        {activeTab === 'refactor' && (
-          <RefactorBlueprintView
-            report={report}
-            folderName={folderName}
-            files={files}
-            hasDriveToken={hasDriveToken}
-            onRequestDriveSave={handleRequestDriveSave}
-            onRequestDriveBundleSave={handleRequestDriveBundleSave}
-            driveSaveResult={driveSaveResult}
           />
         )}
       </main>

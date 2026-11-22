@@ -1,6 +1,8 @@
 import 'dotenv/config';
+import { spawn } from 'child_process';
 import crypto from 'crypto';
 import express from 'express';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
@@ -628,6 +630,359 @@ async function startServer() {
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : '推送工作流文件到 GitHub 失败。',
+      });
+    }
+  });
+
+  // --- Implemented Refactored Workflow v2 Disk Loader & Atomic GitHub Publisher ---
+  const WORKFLOW_V2_DIR = path.resolve(__dirname, 'workflow_v2');
+
+  function collectWorkflowV2Files(): Array<{
+    path: string;
+    sizeBytes: number;
+    lines: number;
+    category: string;
+    content: string;
+  }> {
+    if (!fs.existsSync(WORKFLOW_V2_DIR)) return [];
+    const collected: Array<{
+      path: string;
+      sizeBytes: number;
+      lines: number;
+      category: string;
+      content: string;
+    }> = [];
+
+    function walkDir(dir: string, relPrefix = '') {
+      const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+      for (const entry of entries) {
+        if (entry.name === '__pycache__' || entry.name === '.DS_Store' || entry.name.endsWith('.pyc')) {
+          continue;
+        }
+        const full = path.join(dir, entry.name);
+        const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          walkDir(full, rel);
+        } else {
+          const content = fs.readFileSync(full, 'utf8');
+          const topDir = rel.includes('/') ? rel.split('/')[0] : 'root';
+          collected.push({
+            path: rel,
+            sizeBytes: Buffer.byteLength(content, 'utf8'),
+            lines: content.split('\n').length,
+            category: topDir,
+            content,
+          });
+        }
+      }
+    }
+
+    walkDir(WORKFLOW_V2_DIR);
+    return collected;
+  }
+
+  app.get('/api/workflow-v2/files', (_req, res) => {
+    const files = collectWorkflowV2Files();
+    const totalBytes = files.reduce((sum, f) => sum + f.sizeBytes, 0);
+    const totalLines = files.reduce((sum, f) => sum + f.lines, 0);
+    res.json({
+      name: 'interview-video-objective-agent-v2',
+      version: '2.0.0',
+      fileCount: files.length,
+      totalBytes,
+      totalLines,
+      files,
+    });
+  });
+
+  app.get('/api/workflow-v2/archive', (_req, res) => {
+    if (!fs.existsSync(WORKFLOW_V2_DIR)) {
+      res.status(404).json({ error: 'workflow_v2 目录不存在。' });
+      return;
+    }
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="interview-video-objective-agent-v2.tar.gz"'
+    );
+    const tar = spawn('tar', [
+      '-czf',
+      '-',
+      '-C',
+      WORKFLOW_V2_DIR,
+      '--exclude=__pycache__',
+      '--exclude=*.pyc',
+      '.',
+    ]);
+    tar.stdout.pipe(res);
+    tar.on('error', () => {
+      if (!res.headersSent) {
+        res.status(500).json({ error: '打包压缩包失败。' });
+      }
+    });
+  });
+
+  app.post('/api/github/create-repo', async (req, res) => {
+    const session = getGithubSession(req);
+    if (!session) {
+      res.status(401).json({ error: '请先连接 GitHub 账号。' });
+      return;
+    }
+    const { name, description, isPrivate } = req.body as {
+      name?: string;
+      description?: string;
+      isPrivate?: boolean;
+    };
+    const repoName = (name || '').trim();
+    if (!/^[a-zA-Z0-9._-]{1,100}$/.test(repoName)) {
+      res.status(400).json({ error: '仓库名称仅支持字母、数字、点、横杠或下划线。' });
+      return;
+    }
+
+    try {
+      const ghRes = await fetch('https://api.github.com/user/repos', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session.accessToken}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'CutLogic-Workbench',
+        },
+        body: JSON.stringify({
+          name: repoName,
+          description:
+            description ||
+            'Refactored interview video editing objective workflow v2 (6-stage deterministic + weak-AI guardrailed pipeline)',
+          private: Boolean(isPrivate),
+          auto_init: true,
+        }),
+      });
+      const data = (await ghRes.json()) as {
+        full_name?: string;
+        name?: string;
+        owner?: { login: string };
+        default_branch?: string;
+        private?: boolean;
+        html_url?: string;
+        message?: string;
+        errors?: Array<{ message?: string }>;
+      };
+      if (!ghRes.ok) {
+        const detail = data.errors?.[0]?.message || data.message || '创建 GitHub 仓库失败。';
+        res.status(ghRes.status).json({ error: `创建仓库失败：${detail}` });
+        return;
+      }
+      res.json({
+        repo: {
+          fullName: data.full_name,
+          name: data.name,
+          owner: data.owner?.login || session.user.login,
+          defaultBranch: data.default_branch || 'main',
+          isPrivate: Boolean(data.private),
+          htmlUrl: data.html_url,
+        },
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : '请求 GitHub 创建仓库接口失败。',
+      });
+    }
+  });
+
+  app.post('/api/github/publish-v2', async (req, res) => {
+    const session = getGithubSession(req);
+    if (!session) {
+      res.status(401).json({ error: '请先连接 GitHub 账号后再推送。' });
+      return;
+    }
+
+    const { owner, repo, branch, basePath, commitMessage } = req.body as {
+      owner?: string;
+      repo?: string;
+      branch?: string;
+      basePath?: string;
+      commitMessage?: string;
+    };
+
+    if (!owner || !repo) {
+      res.status(400).json({ error: '请选择或创建目标 GitHub 仓库。' });
+      return;
+    }
+
+    const files = collectWorkflowV2Files();
+    if (files.length === 0) {
+      res.status(500).json({ error: '未找到本地重构工作流文件。' });
+      return;
+    }
+
+    const cleanPrefix = (basePath || '').trim().replace(/^\/+|\/+$/g, '');
+    const targetBranch = (branch || 'main').trim();
+    const message =
+      (commitMessage || '').trim() ||
+      'feat(workflow-v2): implement complete refactored interview video editing workflow';
+    const headers = {
+      Authorization: `Bearer ${session.accessToken}`,
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'User-Agent': 'CutLogic-Workbench',
+    };
+
+    const fullPaths = files.map((f) => ({
+      path: cleanPrefix ? `${cleanPrefix}/${f.path}` : f.path,
+      content: f.content,
+    }));
+
+    try {
+      // Try single atomic commit via Git Data API first
+      const refRes = await fetch(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/ref/heads/${encodeURIComponent(targetBranch)}`,
+        { headers }
+      );
+
+      if (refRes.ok) {
+        const refData = (await refRes.json()) as { object?: { sha?: string } };
+        const parentCommitSha = refData.object?.sha;
+        if (parentCommitSha) {
+          const commitRes = await fetch(
+            `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/commits/${parentCommitSha}`,
+            { headers }
+          );
+          if (commitRes.ok) {
+            const commitData = (await commitRes.json()) as { tree?: { sha?: string } };
+            const baseTreeSha = commitData.tree?.sha;
+
+            const treeItems: Array<{
+              path: string;
+              mode: '100644';
+              type: 'blob';
+              sha: string;
+            }> = [];
+
+            for (const f of fullPaths) {
+              const blobRes = await fetch(
+                `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/blobs`,
+                {
+                  method: 'POST',
+                  headers,
+                  body: JSON.stringify({ content: f.content, encoding: 'utf-8' }),
+                }
+              );
+              if (!blobRes.ok) {
+                const errTxt = await blobRes.text();
+                throw new Error(`创建文件 Blob 失败 (${f.path}): ${errTxt.slice(0, 160)}`);
+              }
+              const blobJson = (await blobRes.json()) as { sha: string };
+              treeItems.push({ path: f.path, mode: '100644', type: 'blob', sha: blobJson.sha });
+            }
+
+            const treeRes = await fetch(
+              `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees`,
+              {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ base_tree: baseTreeSha, tree: treeItems }),
+              }
+            );
+            if (!treeRes.ok) {
+              const errTxt = await treeRes.text();
+              throw new Error(`创建 Git Tree 失败: ${errTxt.slice(0, 180)}`);
+            }
+            const treeJson = (await treeRes.json()) as { sha: string };
+
+            const newCommitRes = await fetch(
+              `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/commits`,
+              {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({
+                  message,
+                  tree: treeJson.sha,
+                  parents: [parentCommitSha],
+                }),
+              }
+            );
+            if (!newCommitRes.ok) {
+              const errTxt = await newCommitRes.text();
+              throw new Error(`创建 Commit 失败: ${errTxt.slice(0, 180)}`);
+            }
+            const newCommitJson = (await newCommitRes.json()) as { sha: string; html_url?: string };
+
+            const patchRefRes = await fetch(
+              `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/refs/heads/${encodeURIComponent(targetBranch)}`,
+              {
+                method: 'PATCH',
+                headers,
+                body: JSON.stringify({ sha: newCommitJson.sha, force: false }),
+              }
+            );
+            if (!patchRefRes.ok) {
+              const errTxt = await patchRefRes.text();
+              throw new Error(`更新分支指针失败: ${errTxt.slice(0, 180)}`);
+            }
+
+            const repoUrl = cleanPrefix
+              ? `https://github.com/${owner}/${repo}/tree/${targetBranch}/${cleanPrefix}`
+              : `https://github.com/${owner}/${repo}/tree/${targetBranch}`;
+            res.json({
+              ok: true,
+              mode: 'atomic_git_tree',
+              commitSha: newCommitJson.sha,
+              commitUrl: `https://github.com/${owner}/${repo}/commit/${newCommitJson.sha}`,
+              repoUrl,
+              fileCount: fullPaths.length,
+              committedPaths: fullPaths.map((f) => f.path),
+            });
+            return;
+          }
+        }
+      }
+
+      // Fallback for brand-new empty repositories without an initial commit: Contents API
+      const committedPaths: string[] = [];
+      for (const f of fullPaths) {
+        const encodedPath = f.path.split('/').map(encodeURIComponent).join('/');
+        let existingSha: string | undefined;
+        const getRes = await fetch(
+          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}?ref=${encodeURIComponent(targetBranch)}`,
+          { headers }
+        );
+        if (getRes.ok) {
+          const existing = (await getRes.json()) as { sha?: string };
+          existingSha = existing.sha;
+        }
+        const putRes = await fetch(
+          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodedPath}`,
+          {
+            method: 'PUT',
+            headers,
+            body: JSON.stringify({
+              message: `${message} (${f.path})`,
+              content: Buffer.from(f.content, 'utf8').toString('base64'),
+              branch: targetBranch,
+              ...(existingSha ? { sha: existingSha } : {}),
+            }),
+          }
+        );
+        if (!putRes.ok) {
+          const errTxt = await putRes.text();
+          throw new Error(`上传 ${f.path} 失败 (${putRes.status}): ${errTxt.slice(0, 180)}`);
+        }
+        committedPaths.push(f.path);
+      }
+
+      const repoUrl = cleanPrefix
+        ? `https://github.com/${owner}/${repo}/tree/${targetBranch}/${cleanPrefix}`
+        : `https://github.com/${owner}/${repo}/tree/${targetBranch}`;
+      res.json({
+        ok: true,
+        mode: 'contents_api',
+        repoUrl,
+        fileCount: committedPaths.length,
+        committedPaths,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : '推送完整工作流到 GitHub 失败。',
       });
     }
   });

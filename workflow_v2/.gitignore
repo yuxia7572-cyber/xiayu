@@ -1,0 +1,22 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime project outputs
+projects/*/01-ingest/
+projects/*/02-analysis/
+projects/*/03-director/
+projects/*/04-plan/
+projects/*/05-voice/
+projects/*/06-render/
+projects/*/07-delivery/
+*.sqlite
+*.sqlite-journal
+*.mp4
+*.mov
+*.wav
+*.tmp
+.DS_Store

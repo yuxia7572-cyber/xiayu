@@ -1,0 +1,49 @@
+{
+  "schema_version": "2.0.0",
+  "description": "Minimal, weak-AI-safe JSON contracts replacing 32 bloated v1 schemas.",
+  "contracts": {
+    "ai_01_asset_curator_output": {
+      "required_keys": ["company_facts", "assets"],
+      "company_facts_item": {
+        "fact_id": "string (e.g. F01)",
+        "claim": "string (strictly grounded in source docs or transcripts)",
+        "evidence_source": "string (filename or segment_id)"
+      },
+      "assets_item": {
+        "source_id": "string (must match source_manifest.json)",
+        "base_class": "company_scene | person_scene | interview_person",
+        "special_role": "none | intro_logo | company_entrance | hero_shot | ending_slogan",
+        "semantic_tags": ["string"],
+        "visual_summary": "string",
+        "confidence": "number (0.0 - 1.0)"
+      }
+    },
+    "ai_02_interview_director_output": {
+      "required_keys": ["segment_decisions", "narration_sentences"],
+      "segment_decisions_item": {
+        "segment_id": "string (must match audio_atoms.json; NEVER invent timestamps)",
+        "speaker_role": "interviewer | interviewee | narration | ambient",
+        "decision": "keep | drop | review",
+        "confidence": "number (0.0 - 1.0)",
+        "reason": "string",
+        "clean_subtitle_chunks": ["string (zero punctuation, <=18 chars per line, semantic phrases)"]
+      },
+      "narration_sentences_item": {
+        "sentence_id": "string (e.g. N01)",
+        "text": "string (factual documentary tone)",
+        "fact_ids": ["string (must reference company_facts)"],
+        "suggested_visual_theme": "string",
+        "subtitle_chunks": ["string (zero punctuation, <=18 chars)"]
+      }
+    },
+    "ai_03_broll_scheduler_output": {
+      "required_keys": ["slots"],
+      "slots_item": {
+        "slot_id": "string (matches narration sentence_id or interview broll slot_id)",
+        "candidates": ["string (up to 3 ordered source_ids from asset_catalog, A->B->C fallback)"],
+        "match_reason": "string",
+        "confidence": "number (0.0 - 1.0)"
+      }
+    }
+  }
+}

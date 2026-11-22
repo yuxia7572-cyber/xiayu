@@ -1,0 +1,6 @@
+# Core pipeline runs on Python 3.10+ standard library + system FFmpeg/FFprobe.
+# Optional enhancers (auto-detected if installed, graceful fallback otherwise):
+# pypdf>=4.0.0            # For extracting text from company brochure PDFs
+# python-docx>=1.1.0      # For extracting text from .docx company documents
+# faster-whisper>=1.0.0   # Optional local ASR if SRT transcripts are not pre-supplied
+# deepfilternet>=0.5.6    # Optional neural denoiser (auto-falls back to FFmpeg highpass+loudnorm)

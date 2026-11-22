@@ -1,0 +1,82 @@
+{
+  "schema_version": "2.0.0",
+  "pipeline_name": "interview-video-objective-agent-v2",
+  "stages": [
+    {
+      "id": "S1_INGEST",
+      "name": "素材探测、防崩文档提取与稳定时序定序",
+      "layer": "deterministic",
+      "owner": "engine/ingest.py",
+      "prerequisites": [],
+      "outputs": [
+        "01-ingest/source_manifest.json",
+        "01-ingest/doc_extracts.json"
+      ]
+    },
+    {
+      "id": "S2_AUDIO_AND_ATOMS",
+      "name": "非破坏性音频清洗与不可变 segment_id 原子切分",
+      "layer": "deterministic",
+      "owner": "engine/audio_ops.py",
+      "prerequisites": ["S1_INGEST"],
+      "outputs": [
+        "02-analysis/audio_atoms.json"
+      ]
+    },
+    {
+      "id": "S3_CURATE_AND_DIRECT",
+      "name": "弱 AI 三段原子决策（定类 / 精剪伴随字幕 / 口播撰稿）+ 防御性修复",
+      "layer": "weak_ai_guardrailed",
+      "owner": "engine/weak_ai_bridge.py",
+      "prompts": [
+        "prompts/01_asset_curator.md",
+        "prompts/02_interview_director.md"
+      ],
+      "prerequisites": ["S2_AUDIO_AND_ATOMS"],
+      "outputs": [
+        "03-director/asset_catalog.json",
+        "03-director/director_plan.json",
+        "03-director/review_queue.json"
+      ]
+    },
+    {
+      "id": "S4_VOICE_AND_BROLL",
+      "name": "双轨配音接入（人工/TTS）+ 语义对题 3 级候选 B-roll 排期",
+      "layer": "hybrid",
+      "owner": "engine/voice_and_ledger.py",
+      "prompts": [
+        "prompts/03_broll_scheduler.md"
+      ],
+      "prerequisites": ["S3_CURATE_AND_DIRECT"],
+      "outputs": [
+        "05-voice/voice_manifest.json",
+        "04-plan/broll_schedule.json"
+      ]
+    },
+    {
+      "id": "S5_LEDGER_AND_SUBTITLES",
+      "name": "SQLite 排他锁与自动候选替补 + 零标点伴随字幕双编译",
+      "layer": "deterministic",
+      "owner": "engine/voice_and_ledger.py + engine/subtitles.py",
+      "prerequisites": ["S4_VOICE_AND_BROLL"],
+      "outputs": [
+        "04-plan/material_ledger.sqlite",
+        "04-plan/timeline_plan.json",
+        "04-plan/subtitles.ass",
+        "04-plan/subtitles.srt"
+      ]
+    },
+    {
+      "id": "S6_RENDER_AND_QC",
+      "name": "FFmpeg NVENC/libx264 自适应渲染 + 真哈希 QC 与交付封包",
+      "layer": "deterministic",
+      "owner": "engine/renderer.py",
+      "prerequisites": ["S5_LEDGER_AND_SUBTITLES"],
+      "outputs": [
+        "06-render/interview_with_intro.mp4",
+        "07-delivery/qc_report.json",
+        "07-delivery/delivery_manifest.json"
+      ]
+    }
+  ]
+}
